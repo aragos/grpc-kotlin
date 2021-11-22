@@ -10,9 +10,7 @@ plugins {
 
 ext["grpcVersion"] = "1.36.0" // CURRENT_GRPC_VERSION
 ext["protobufVersion"] = "3.14.0"
-ext["kotlinVersion"] = "1.3.61"
 ext["coroutinesVersion"] = "1.3.3"
-ext["googleauthVersion"] = "0.20.0"
 
 subprojects {
 
@@ -25,7 +23,7 @@ subprojects {
     }
 
     group = "io.grpc"
-    version = "1.1.0" // CURRENT_GRPC_KOTLIN_VERSION
+    version = "1.2.0" // CURRENT_GRPC_KOTLIN_VERSION
 
     repositories {
         mavenCentral()

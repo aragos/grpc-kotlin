@@ -103,6 +103,27 @@ class ServerCallsTest : AbstractCallsTest() {
   }
 
   @Test
+  fun unaryMethodCancellationContextWithJobPropagatedToServer() = runBlocking {
+    val completable = CompletableDeferred<Int>()
+    val requestReceived = Job()
+    val channel = makeChannel(
+      // Note that we use runBlocking's context here
+      ServerCalls.unaryServerMethodDefinition(coroutineContext, sayHelloMethod) {
+        requestReceived.complete()
+        suspendUntilCancelled {
+          completable.complete(42)
+        }
+      }
+    )
+
+    val stub = GreeterGrpc.newFutureStub(channel)
+    val future = stub.sayHello(helloRequest("Garnet"))
+    requestReceived.join()
+    future.cancel(true)
+    assertThat(completable.await()).isEqualTo(42)
+  }
+
+  @Test
   fun unaryRequestHandledWithoutWaitingForHalfClose() = runBlocking {
     val processingStarted = Job()
     val channel = makeChannel(
@@ -797,5 +818,144 @@ class ServerCallsTest : AbstractCallsTest() {
     assertThat(
       ClientCalls.unaryRpc(channel, sayHelloMethod, helloRequest(""))
     ).isEqualTo(helloReply("Hello!"))
+  }
+
+  @Test
+  fun serverCallListenerDefersHeaders() = runBlocking {
+    val requestReceived = Job()
+    val responseReleased = Job()
+    val channel = makeChannel(
+      ServerCalls.unaryServerMethodDefinition(context, sayHelloMethod) {
+        requestReceived.complete()
+        responseReleased.join()
+        helloReply("Hello, ${it.name}")
+      }
+    )
+
+    val call = channel.newCall(sayHelloMethod, CallOptions.DEFAULT)
+
+    val headersReceived = Job()
+    val responseReceived = CompletableDeferred<HelloReply>()
+    val closeStatus = CompletableDeferred<Status>()
+
+    call.start(
+      object : ClientCall.Listener<HelloReply>() {
+        override fun onHeaders(headers: Metadata) {
+          headersReceived.complete()
+        }
+
+        override fun onMessage(message: HelloReply) {
+          responseReceived.complete(message)
+        }
+
+        override fun onClose(status: Status, trailers: Metadata) {
+          closeStatus.complete(status)
+        }
+      },
+      Metadata()
+    )
+    call.sendMessage(helloRequest("Bob"))
+    call.request(1)
+    call.halfClose()
+    // wait for the handler to begin
+    requestReceived.join()
+    delay(200)
+    // headers should not have been sent
+    assertThat(headersReceived.isCompleted).isFalse()
+    // release the handler
+    responseReleased.complete()
+    headersReceived.join()
+    assertThat(responseReceived.await()).isEqualTo(helloReply("Hello, Bob"))
+    assertThat(closeStatus.await().code).isEqualTo(Status.Code.OK)
+  }
+
+  @Test
+  fun serverCallListenerDefersHeadersOnException() = runBlocking {
+    val requestReceived = Job()
+    val responseReleased = Job()
+    val channel = makeChannel(
+      ServerCalls.unaryServerMethodDefinition(context, sayHelloMethod) {
+        requestReceived.complete()
+        responseReleased.join()
+        throw StatusException(Status.INTERNAL.withDescription("no response frames"))
+      }
+    )
+
+    val call = channel.newCall(sayHelloMethod, CallOptions.DEFAULT)
+
+    val headersReceived = Job()
+    val closeStatus = CompletableDeferred<Status>()
+
+    call.start(
+      object : ClientCall.Listener<HelloReply>() {
+        override fun onHeaders(headers: Metadata) {
+          headersReceived.complete()
+        }
+
+        override fun onClose(status: Status, trailers: Metadata) {
+          closeStatus.complete(status)
+        }
+      },
+      Metadata()
+    )
+    call.sendMessage(helloRequest("Bob"))
+    call.request(1)
+    call.halfClose()
+    // wait for the handler to begin
+    requestReceived.join()
+    delay(200)
+    // headers should not have been sent
+    assertThat(headersReceived.isCompleted).isFalse()
+    // release the handler
+    responseReleased.complete()
+    headersReceived.join()
+    val status = closeStatus.await()
+    assertThat(status.code).isEqualTo(Status.Code.INTERNAL)
+    assertThat(status.description).contains("no response frames")
+  }
+
+  @Test
+  fun serverCallListenerDefersHeadersOnEmptyStream() = runBlocking {
+    val requestReceived = Job()
+    val responseReleased = Job()
+    val channel = makeChannel(
+      ServerCalls.serverStreamingServerMethodDefinition(context, serverStreamingSayHelloMethod) {
+        flow {
+          requestReceived.complete()
+          responseReleased.join()
+        }
+      }
+    )
+
+    val call = channel.newCall(serverStreamingSayHelloMethod, CallOptions.DEFAULT)
+
+    val headersReceived = Job()
+    val closeStatus = CompletableDeferred<Status>()
+
+    call.start(
+      object : ClientCall.Listener<HelloReply>() {
+        override fun onHeaders(headers: Metadata) {
+          headersReceived.complete()
+        }
+
+        override fun onClose(status: Status, trailers: Metadata) {
+          closeStatus.complete(status)
+        }
+      },
+      Metadata()
+    )
+    call.sendMessage(multiHelloRequest("Bob", "Fred"))
+    call.request(1)
+    call.halfClose()
+    // wait for the handler to begin
+    requestReceived.join()
+    delay(200)
+    // headers should not have been sent
+    assertThat(headersReceived.isCompleted).isFalse()
+    // release the handler
+    responseReleased.complete()
+    headersReceived.join()
+    val status = closeStatus.await()
+    assertThat(status.code).isEqualTo(Status.Code.OK)
   }
 }
